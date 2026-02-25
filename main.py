@@ -94,18 +94,7 @@ async def on_message(message):
     await message.reply(reply, mention_author=False)
 
 
-    if HEY_PATTERN.search(message.content):
-        is_owner = message.author.id == OWNER_ID
-        username = message.author.display_name
-
-        async with message.channel.typing():
-            reply = get_response(username, message.content, is_owner)
-
-        await message.reply(reply)
-
-    await bot.process_commands(message)
-
-
-if not BOT_TOKEN:
+if not DISCORD_BOT_TOKEN:
     print("ERROR: DISCORD_BOT_TOKEN is not set!")
-    exit(1)
+else:
+    client.run(DISCORD_BOT_TOKEN)
