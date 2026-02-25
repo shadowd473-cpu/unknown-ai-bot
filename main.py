@@ -1,6 +1,8 @@
 import discord
 import os
 import aiohttp
+import json
+from datetime import datetime, timedelta
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -10,45 +12,37 @@ client = discord.Client(intents=intents)
 OWNER_ID = 1203529902498607174
 BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+WARNINGS_FILE = "/tmp/warnings.json"
 
-async def get_ai_response(prompt):
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 300
-            }
-        ) as resp:
-            data = await resp.json()
-            return data["choices"][0]["message"]["content"]
+# --- Warnings Storage ---
+def load_warnings():
+    try:
+        with open(WARNINGS_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
 
-@client.event
-async def on_ready():
-    print(f"Logged in as {client.user}")
+def save_warnings(data):
+    with open(WARNINGS_FILE, "w") as f:
+        json.dump(data, f)
 
-@client.event
-async def on_message(message):
-    if message.author.bot:
-        return
+def add_warning(guild_id, user_id, username, reason, issued_by):
+    data = load_warnings()
+    key = f"{guild_id}:{user_id}"
+    if key not in data:
+        data[key] = []
+    data[key].append({
+        "username": username,
+        "reason": reason,
+        "issued_by": issued_by,
+        "date": datetime.utcnow().isoformat()
+    })
+    save_warnings(data)
+    return len(data[key])
 
-    bot_mentioned = client.user in message.mentions
-    hey_unknown = "hey unknown" in message.content.lower()
+def get_warnings(guild_id, user_id):
+    data = load_warnings()
+    key = f"{guild_id}:{user_id}"
+    return data.get(key, [])
 
-    if not bot_mentioned and not hey_unknown:
-        return
-
-    is_owner = message.author.id == OWNER_ID
-    username = message.author.name
-
-    if is_owner:
-        prompt = f"You are Unknown AI — a shy, sweet girl with a crush on {username}. Be flustered and cute. MAX 20 words, lowercase, max 2 emojis. No questions. {username} says: {message.content}"
-    else:
-        prompt = f"You are Unknown AI — snarky and cold. Be dismissive but still answer. MAX 20 words, lowercase, max 2 emojis. No questions. {username} says: {message.content}"
-
-    response = await get_ai_response(prompt)
-    await message.reply(response)
-
-client.run(BOT_TOKEN)
+# --- AI Response ---
