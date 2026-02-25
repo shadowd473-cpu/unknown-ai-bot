@@ -70,11 +70,23 @@ async def on_message(message):
         return
 
     content = message.content.strip().lower()
-    if not content.startswith("hey unknown"):
+    triggered = False
+    user_message = ""
+
+    # Check for "hey unknown"
+    if content.startswith("hey unknown"):
+        triggered = True
+        user_message = message.content.strip()[len("hey unknown"):].strip()
+
+    # Check for @mention
+      if client.user in message.mentions:
+        triggered = True
+        # Remove the mention from the message
+        user_message = message.content.replace(f"<@{client.user.id}>", "").strip()
+
+    if not triggered:
         return
 
-    # Get the actual message after "hey unknown"
-    user_message = message.content.strip()[len("hey unknown"):].strip()
     if not user_message:
         user_message = "hey"
 
