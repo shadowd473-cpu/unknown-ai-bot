@@ -200,3 +200,30 @@ async def on_interaction(interaction):
         await interaction.followup.send(response[:2000])
 
 client.run(BOT_TOKEN)
+@client.event
+async def on_message(message):
+    print(f"[MSG] Author: {message.author} | Bot: {message.author.bot} | Content: '{message.content}'")
+    
+    if message.author.bot:
+        return
+
+    bot_mentioned = client.user in message.mentions
+    hey_unknown = "hey unknown" in message.content.lower()
+    
+    print(f"[CHECK] Mentioned: {bot_mentioned} | Hey Unknown: {hey_unknown}")
+
+    if not bot_mentioned and not hey_unknown:
+        return
+
+    print(f"[RESPONDING] To: {message.author.name}")
+    
+    is_owner = message.author.id == OWNER_ID
+    username = message.author.name
+
+    if is_owner:
+        prompt = f"You are Unknown AI — a shy, sweet girl with a crush on {username}. Be flustered and cute. MAX 20 words, lowercase, max 2 emojis. No questions. {username} says: {message.content}"
+    else:
+        prompt = f"You are Unknown AI — snarky and cold. Be dismissive but still answer. MAX 20 words, lowercase, max 2 emojis. No questions. {username} says: {message.content}"
+
+    response = await get_ai_response(prompt)
+    await message.reply(response)
