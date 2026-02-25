@@ -123,3 +123,80 @@ async def on_interaction(interaction):
             f"⚠️ **Warning issued to <@{target_id}>**\n**Reason:** {reason}\n**Total warnings:** {count}"
         )
 
+# /mute user duration reason
+    elif command == "mute":
+        target_id = options["user"]
+        duration = options.get("duration", 5)
+        reason = options.get("reason", "No reason provided")
+        timeout_until = (datetime.utcnow() + timedelta(minutes=duration)).isoformat()
+
+        try:
+            await discord_api("PATCH", f"/guilds/{guild_id}/members/{target_id}", {
+                "communication_disabled_until": timeout_until
+            })
+            await interaction.response.send_message(
+                f"🔇 **<@{target_id}> has been muted for {duration} minute(s).**\n**Reason:** {reason}"
+            )
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Failed to mute: {e}")
+
+    # /purge amount
+    elif command == "purge":
+        amount = min(max(options.get("amount", 5), 1), 100)
+        channel_id = str(interaction.channel_id)
+
+        try:
+            messages = await discord_api("GET", f"/channels/{channel_id}/messages?limit={amount}")
+            if not messages:
+                await interaction.response.send_message("❌ No messages found.")
+                return
+
+            # Filter messages older than 14 days
+            two_weeks_ago = datetime.utcnow() - timedelta(days=14)
+            deletable = [m for m in messages if datetime.fromisoformat(m["timestamp"].replace("+00:00", "")) > two_weeks_ago]
+
+            if not deletable:
+                await interaction.response.send_message("❌ No deletable messages (older than 14 days).")
+                return
+
+            if len(deletable) == 1:
+                await discord_api("DELETE", f"/channels/{channel_id}/messages/{deletable[0]['id']}")
+            else:
+                await discord_api("POST", f"/channels/{channel_id}/messages/bulk-delete", {
+                    "messages": [m["id"] for m in deletable]
+                })
+
+            await interaction.response.send_message(f"🗑️ **Deleted {len(deletable)} message(s).**")
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Failed to purge: {e}")
+
+    # /warnings user
+    elif command == "warnings":
+        target_id = options["user"]
+        warns = get_warnings(guild_id, target_id)
+
+        if not warns:
+            await interaction.response.send_message(f"✅ <@{target_id}> has no warnings.")
+        else:
+            lines = [f"**{i+1}.** {w['reason']} ({w['date'][:10]})" for i, w in enumerate(warns)]
+            await interaction.response.send_message(
+                f"📋 **Warnings for <@{target_id}> ({len(warns)} total):**\n" + "\n".join(lines)
+            )
+
+    # /unknown message (chat command)
+    elif command == "unknown":
+        user_message = options.get("message", "")
+        username = interaction.user.name
+        is_owner = interaction.user.id == OWNER_ID
+
+        await interaction.response.defer()
+
+        if is_owner:
+            prompt = f"You are Unknown AI — a shy, sweet girl with a crush on {username}. Be flustered and cute. MAX 20 words, lowercase, max 2 emojis. No questions. {username} says: {user_message}"
+        else:
+            prompt = f"You are Unknown AI — snarky and cold. Be dismissive but still answer. MAX 20 words, lowercase, max 2 emojis. No questions. {username} says: {user_message}"
+
+        response = await get_ai_response(prompt)
+        await interaction.followup.send(response[:2000])
+
+client.run(BOT_TOKEN)
