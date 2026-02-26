@@ -132,7 +132,7 @@ async def on_message(message):
     if str(message.author.id) == str(DISCORD_OWNER_ID):
         cmd = message.content.strip().lower()
 
-     if cmd in ("!join", "/join"):
+    if cmd in ("!join", "/join"):
             if not message.author.voice or not message.author.voice.channel:
                 return await message.channel.send("Join a voice channel first.")
             channel = message.author.voice.channel
