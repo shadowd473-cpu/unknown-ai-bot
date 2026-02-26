@@ -20,13 +20,8 @@ intents.message_content = True
 intents.voice_states = True
 client = discord.Client(intents=intents)
 
-# === VC control (owner-only, manual only) ===
-connect_locks = {}
-FOLLOW_ENABLED = False
-
 
 async def call_base44(action, payload):
-    """Call Base44 botMemory function."""
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {BASE44_TOKEN}",
@@ -40,7 +35,6 @@ async def call_base44(action, payload):
 
 
 async def get_ai_response(user_id, username, message_text):
-    """Get a response from OpenAI with memory context."""
     memories = []
     mem_data = await call_base44("get_user_memories", {"user_id": str(user_id)})
     if mem_data and mem_data.get("facts"):
@@ -83,7 +77,6 @@ STRICT RULES:
 
     ai_text = response.choices[0].message.content
 
-    # Try to extract a memory from the conversation
     try:
         mem_response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
@@ -104,16 +97,15 @@ STRICT RULES:
 
     return ai_text
 
+
 @client.event
 async def on_ready():
     print(f"Logged in as {client.user} (ID: {client.user.id})")
-    print("Bot is ready. No auto-join — use !join to connect to voice.")
+    print("Bot is ready. Use !join / !leave for voice.")
 
 
 @client.event
 async def on_message(message):
-    global FOLLOW_ENABLED
-
     if message.author.bot or not message.guild:
         return
 
@@ -139,7 +131,7 @@ async def on_message(message):
                 return await message.channel.send("Left voice channel.")
             return await message.channel.send("I'm not in a voice channel.")
 
-        # === Chat AI (respond when mentioned or in DMs) ===
+    # === Chat AI ===
     if client.user.mentioned_in(message) or isinstance(message.channel, discord.DMChannel) or "hey unknown" in message.content.lower():
         clean_text = message.content.replace(f"<@{client.user.id}>", "").strip()
         if not clean_text:
@@ -151,7 +143,6 @@ async def on_message(message):
             )
 
         await message.reply(reply, mention_author=False)
-
 
 
 # === RUN ===
