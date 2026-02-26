@@ -1,30 +1,50 @@
 import os
 import json
 import asyncio
+import re
 import discord
 import aiohttp
 from openai import OpenAI
-import io
-import struct
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
+import yt_dlp
+
 
 class SilenceSource(discord.AudioSource):
     """Streams silence to keep the bot connected to voice."""
     def read(self):
-        # 20ms of silence in Opus format
-        # This is the smallest valid Opus frame
         return b'\xf8\xff\xfe'
 
     def is_opus(self):
         return True
-        
+
+
 # === CONFIG ===
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DISCORD_OWNER_ID = os.getenv("DISCORD_OWNER_ID")
 BASE44_FUNCTION_URL = os.getenv("BASE44_FUNCTION_URL")
 BASE44_TOKEN = os.getenv("BASE44_TOKEN")
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
+sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
+    client_id=SPOTIFY_CLIENT_ID,
+    client_secret=SPOTIFY_CLIENT_SECRET,
+))
+
+YDL_OPTIONS = {
+    'format': 'bestaudio/best',
+    'noplaylist': True,
+    'quiet': True,
+    'no_warnings': True,
+}
+FFMPEG_OPTIONS = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn',
+}
 
 # Discord client
 intents = discord.Intents.default()
@@ -110,10 +130,24 @@ STRICT RULES:
     return ai_text
 
 
-@client.event
-async def on_ready():
-    print(f"Logged in as {client.user} (ID: {client.user.id})")
-    print("Bot is ready. Use !join / !leave for voice.")
+def get_spotify_track_name(url):
+    match = re.search(r'track/([a-zA-Z0-9]+)', url)
+    if not match:
+        return None
+    track_id = match.group(1)
+    track = sp.track(track_id)
+    artist = track['artists'][0]['name']
+    name = track['name']
+    return f"{artist} - {name}"
+
+
+def get_youtube_audio_url(search_query):
+    with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+        info = ydl.extract_info(f"ytsearch:{search_query}", download=False)
+        if info and 'entries' in info and len(info['entries']) > 0:
+            return info['entries'][0]['url']
+    return None
+
 
 async def keep_silence_loop():
     while True:
@@ -124,17 +158,25 @@ async def keep_silence_loop():
                     vc.play(SilenceSource(), after=lambda e: None)
             except Exception:
                 pass
-                
+
+
+@client.event
+async def on_ready():
+    print(f"Logged in as {client.user} (ID: {client.user.id})")
+    print("Bot is ready. Use !join / !leave / !play / !stop for voice.")
+    client.loop.create_task(keep_silence_loop())
+
+
 @client.event
 async def on_message(message):
     if message.author.bot or not message.guild:
         return
 
-    # === Owner-only VC commands ===
+    # === Owner-only commands ===
     if str(message.author.id) == str(DISCORD_OWNER_ID):
         cmd = message.content.strip().lower()
 
-    if cmd in ("!join", "/join"):
+        if cmd in ("!join", "/join"):
             if not message.author.voice or not message.author.voice.channel:
                 return await message.channel.send("Join a voice channel first.")
             channel = message.author.voice.channel
@@ -143,18 +185,54 @@ async def on_message(message):
                 vc = await channel.connect(reconnect=False)
             elif vc.channel != channel:
                 await vc.move_to(channel)
-            # Small delay then play silence to stay connected
             await asyncio.sleep(1)
             if vc.is_connected() and not vc.is_playing():
                 vc.play(SilenceSource(), after=lambda e: None)
             return await message.channel.send(f"Joined {channel.name}.")
 
-    if cmd in ("!leave", "/leave"):
+        if cmd in ("!leave", "/leave"):
             vc = message.guild.voice_client
             if vc and vc.is_connected():
                 await vc.disconnect()
                 return await message.channel.send("Left voice channel.")
             return await message.channel.send("I'm not in a voice channel.")
+
+        if cmd.startswith("!play "):
+            url = message.content.strip().split(" ", 1)[1]
+            vc = message.guild.voice_client
+
+            if not vc or not vc.is_connected():
+                if not message.author.voice or not message.author.voice.channel:
+                    return await message.channel.send("Join a voice channel first, or use !join.")
+                vc = await message.author.voice.channel.connect(reconnect=False)
+                await asyncio.sleep(1)
+
+            if "spotify.com/track" in url:
+                song_name = get_spotify_track_name(url)
+                if not song_name:
+                    return await message.channel.send("Couldn't read that Spotify link.")
+                await message.channel.send(f"🔍 Searching: **{song_name}**...")
+            else:
+                song_name = url
+
+            audio_url = get_youtube_audio_url(song_name)
+            if not audio_url:
+                return await message.channel.send("Couldn't find that song.")
+
+            if vc.is_playing():
+                vc.stop()
+
+            source = discord.FFmpegPCMAudio(audio_url, **FFMPEG_OPTIONS)
+            vc.play(source, after=lambda e: print(f"Finished playing: {e}") if e else None)
+            return await message.channel.send(f"🎵 Now playing: **{song_name}**")
+
+        if cmd == "!stop":
+            vc = message.guild.voice_client
+            if vc and vc.is_playing():
+                vc.stop()
+                vc.play(SilenceSource(), after=lambda e: None)
+                return await message.channel.send("⏹️ Stopped.")
+            return await message.channel.send("Nothing is playing.")
 
     # === Chat AI ===
     if client.user.mentioned_in(message) or isinstance(message.channel, discord.DMChannel) or "hey unknown" in message.content.lower():
