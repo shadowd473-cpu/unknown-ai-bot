@@ -1,9 +1,6 @@
-discord.py==2.4.0
-openai==1.61.0
-audioop-lts==0.2.1
 discord.py[voice]
 openai
+aiohttp
+spotipy
 yt-dlp
 PyNaCl
-spotipy
-aiohttp
