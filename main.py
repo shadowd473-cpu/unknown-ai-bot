@@ -4,7 +4,19 @@ import asyncio
 import discord
 import aiohttp
 from openai import OpenAI
+import io
+import struct
 
+class SilenceSource(discord.AudioSource):
+    """Streams silence to keep the bot connected to voice."""
+    def read(self):
+        # 20ms of silence in Opus format
+        # This is the smallest valid Opus frame
+        return b'\xf8\xff\xfe'
+
+    def is_opus(self):
+        return True
+        
 # === CONFIG ===
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -103,7 +115,14 @@ async def on_ready():
     print(f"Logged in as {client.user} (ID: {client.user.id})")
     print("Bot is ready. Use !join / !leave for voice.")
 
-
+async def keep_silence_loop():
+    """Ensures silence keeps playing so bot stays connected."""
+    while True:
+        await asyncio.sleep(30)
+        for vc in client.voice_clients:
+            if vc.is_connected() and not vc.is_playing():
+                vc.play(SilenceSource(), after=lambda e: None)
+                
 @client.event
 async def on_message(message):
     if message.author.bot or not message.guild:
@@ -113,15 +132,18 @@ async def on_message(message):
     if str(message.author.id) == str(DISCORD_OWNER_ID):
         cmd = message.content.strip().lower()
 
-        if cmd in ("!join", "/join"):
+     if cmd in ("!join", "/join"):
             if not message.author.voice or not message.author.voice.channel:
                 return await message.channel.send("Join a voice channel first.")
             channel = message.author.voice.channel
             vc = message.guild.voice_client
             if not vc or not vc.is_connected():
-                await channel.connect(reconnect=False)
+                vc = await channel.connect(reconnect=True)
             elif vc.channel != channel:
                 await vc.move_to(channel)
+            # Play silence to prevent auto-disconnect
+            if not vc.is_playing():
+                vc.play(SilenceSource(), after=lambda e: None)
             return await message.channel.send(f"Joined {channel.name}.")
 
         if cmd in ("!leave", "/leave"):
