@@ -13,6 +13,6 @@ RUN apt-get install -y libopus0
 RUN apt-get update && apt-get install -y ffmpeg
 RUN pip install yt-dlp
 
-pip install spotipy
+RUN pip install spotipy
 ffmpeg -version
 yt-dlp --version
