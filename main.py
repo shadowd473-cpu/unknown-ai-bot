@@ -146,7 +146,7 @@ async def on_message(message):
                 vc.play(SilenceSource(), after=lambda e: None)
             return await message.channel.send(f"Joined {channel.name}.")
 
-        if cmd in ("!leave", "/leave"):
+    if cmd in ("!leave", "/leave"):
             vc = message.guild.voice_client
             if vc and vc.is_connected():
                 await vc.disconnect()
