@@ -39,12 +39,13 @@ now_playing = {}
 
 # yt-dlp options
 YDL_OPTIONS = {
-    "format": "bestaudio/best",
+    "format": "bestaudio[ext=webm]/bestaudio/best",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
     "default_search": "ytsearch",
     "extract_flat": False,
+    "skip_download": True,
 }
 
 FFMPEG_OPTIONS = {
@@ -58,7 +59,6 @@ FFMPEG_OPTIONS = {
 # ============================================
 
 async def call_base44(action, **kwargs):
-    """Call Base44 backend function for persistent storage."""
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {BASE44_TOKEN}",
@@ -92,11 +92,10 @@ async def save_knowledge_fact(topic, fact, source="conversation"):
 
 
 # ============================================
-# MEMORY EXTRACTION (from conversations)
+# MEMORY EXTRACTION
 # ============================================
 
 async def extract_memories(username, user_message, ai_response, user_id):
-    """Extract personal facts about a user from conversation."""
     existing = await get_user_memories(user_id)
     existing_str = "\n".join(f"- {m}" for m in existing) if existing else "None yet."
     
@@ -126,7 +125,6 @@ async def extract_memories(username, user_message, ai_response, user_id):
 
 
 async def extract_knowledge(user_message, ai_response):
-    """Extract general knowledge facts from conversation."""
     extraction = openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -134,8 +132,7 @@ async def extract_knowledge(user_message, ai_response):
                 "You extract general knowledge facts from a conversation. "
                 "Return a JSON object with a 'topics' array. Each topic has a 'topic' string and 'facts' array of strings. "
                 "Only extract factual, interesting, or educational information — NOT personal user info. "
-                "Return {\"topics\": []} if nothing educational worth saving.\n\n"
-                "Example: {\"topics\": [{\"topic\": \"black holes\", \"facts\": [\"Black holes can evaporate via Hawking radiation\"]}]}"
+                "Return {\"topics\": []} if nothing educational worth saving."
             )},
             {"role": "user", "content": f"User asked: \"{user_message}\"\nAI said: \"{ai_response}\""},
         ],
@@ -157,21 +154,16 @@ async def extract_knowledge(user_message, ai_response):
 # ============================================
 
 async def search_web(query):
-    """Use OpenAI's web search to learn about a topic."""
     try:
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini-search-preview",
             web_search_options={"search_context_size": "medium"},
             messages=[
-                {"role": "system", "content": (
-                    "You are a research assistant. Provide detailed, factual information about the topic. "
-                    "Include specific facts, dates, numbers, and interesting details."
-                )},
+                {"role": "system", "content": "You are a research assistant. Provide detailed, factual information."},
                 {"role": "user", "content": query},
             ],
         )
         content = response.choices[0].message.content
-        # Save what was learned
         await extract_knowledge(query, content)
         return content
     except Exception as e:
@@ -180,7 +172,6 @@ async def search_web(query):
 
 
 def should_search_web(message):
-    """Determine if the message needs a web search."""
     triggers = [
         "what is", "what are", "who is", "who are", "when did", "when was",
         "how does", "how do", "how many", "how much", "tell me about",
@@ -204,7 +195,6 @@ def get_queue(guild_id):
 
 
 def resolve_spotify_to_search(url):
-    """Convert a Spotify link to YouTube search query."""
     if not sp:
         return None
     try:
@@ -231,12 +221,29 @@ def resolve_spotify_to_search(url):
 
 
 def search_youtube(query):
-    """Search YouTube and return audio URL + title."""
-    with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-        info = ydl.extract_info(f"ytsearch:{query}", download=False)
-        if "entries" in info and len(info["entries"]) > 0:
-            entry = info["entries"][0]
-            return {"url": entry["url"], "title": entry.get("title", query)}
+    try:
+        with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+            if query.startswith("http"):
+                info = ydl.extract_info(query, download=False)
+            else:
+                info = ydl.extract_info(f"ytsearch:{query}", download=False)
+            
+            if "entries" in info and len(info["entries"]) > 0:
+                entry = info["entries"][0]
+            else:
+                entry = info
+            
+            url = entry.get("url")
+            if not url:
+                webpage_url = entry.get("webpage_url") or entry.get("original_url")
+                if webpage_url:
+                    info2 = ydl.extract_info(webpage_url, download=False)
+                    url = info2.get("url")
+            
+            if url:
+                return {"url": url, "title": entry.get("title", query)}
+    except Exception as e:
+        print(f"YouTube search error: {e}")
     return None
 
 
@@ -244,23 +251,46 @@ async def play_next(guild_id, voice_client):
     queue = get_queue(guild_id)
     if not queue:
         now_playing.pop(guild_id, None)
-        await voice_client.disconnect()
+        # Stay in VC, don't auto-disconnect
         return
+    
     song = queue.pop(0)
+    
+    # Lazy resolve if URL is missing
+    if not song.get("url"):
+        resolved = search_youtube(song.get("search_query", song["title"]))
+        if not resolved:
+            print(f"Couldn't resolve: {song['title']}, skipping")
+            await play_next(guild_id, voice_client)
+            return
+        song = resolved
+    
     now_playing[guild_id] = song["title"]
-    source = discord.FFmpegPCMAudio(song["url"], **FFMPEG_OPTIONS)
-    source = discord.PCMVolumeTransformer(source, volume=0.5)
+    
+    try:
+        source = discord.FFmpegPCMAudio(song["url"], **FFMPEG_OPTIONS)
+        source = discord.PCMVolumeTransformer(source, volume=0.5)
+    except Exception as e:
+        print(f"Error creating audio source: {e}")
+        now_playing.pop(guild_id, None)
+        return
 
     def after_playing(error):
         if error:
             print(f"Player error: {error}")
-        asyncio.run_coroutine_threadsafe(play_next(guild_id, voice_client), client.loop)
+        fut = asyncio.run_coroutine_threadsafe(play_next(guild_id, voice_client), client.loop)
+        try:
+            fut.result(timeout=10)
+        except Exception as e:
+            print(f"Error in play_next callback: {e}")
 
-    voice_client.play(source, after=after_playing)
+    if voice_client.is_connected():
+        voice_client.play(source, after=after_playing)
+    else:
+        now_playing.pop(guild_id, None)
 
 
 async def handle_play(message, query):
-    """Handle the play command."""
     if not message.author.voice:
         await message.reply("you gotta be in a voice channel first 🙄")
         return
@@ -269,7 +299,6 @@ async def handle_play(message, query):
     guild_id = message.guild.id
     queue = get_queue(guild_id)
 
-    # Check for Spotify link
     songs_to_add = []
     if "open.spotify.com" in query:
         result = resolve_spotify_to_search(query)
@@ -284,37 +313,31 @@ async def handle_play(message, query):
     else:
         songs_to_add = [query]
 
-    # Search YouTube for each
-    added = []
-    for search_query in songs_to_add:
-        song = search_youtube(search_query)
-        if song:
-            queue.append(song)
-            added.append(song["title"])
-
-    if not added:
+    # Only resolve the FIRST song now
+    first_song = search_youtube(songs_to_add[0])
+    if not first_song:
         await message.reply("couldn't find that song 😔")
         return
 
-    # Connect to voice
+    # Queue remaining as search terms (resolved lazily when played)
+    for sq in songs_to_add[1:]:
+        queue.append({"search_query": sq, "title": sq, "url": None})
+
     voice_client = message.guild.voice_client
     if not voice_client:
         voice_client = await voice_channel.connect()
     elif voice_client.channel != voice_channel:
         await voice_client.move_to(voice_channel)
 
-    # Start playing if not already
     if not voice_client.is_playing() and not voice_client.is_paused():
+        queue.insert(0, first_song)
         await play_next(guild_id, voice_client)
-        if len(added) == 1:
-            await message.reply(f"🎵 now playing: **{added[0]}**")
-        else:
-            await message.reply(f"🎵 now playing: **{added[0]}** (+{len(added)-1} more queued)")
+        await message.reply(f"🎵 now playing: **{first_song['title']}**" +
+                          (f" (+{len(songs_to_add)-1} more queued)" if len(songs_to_add) > 1 else ""))
     else:
-        if len(added) == 1:
-            await message.reply(f"added to queue: **{added[0]}** (position #{len(queue)})")
-        else:
-            await message.reply(f"added **{len(added)}** songs to queue ✨")
+        queue.append(first_song)
+        await message.reply(f"added to queue: **{first_song['title']}**" +
+                          (f" (+{len(songs_to_add)-1} more)" if len(songs_to_add) > 1 else ""))
 
 
 # ============================================
@@ -418,20 +441,16 @@ async def on_message(message):
     is_owner = str(user_id) == DISCORD_OWNER_ID
 
     async with message.channel.typing():
-
-        # Get personal memories
         user_mems = await get_user_memories(user_id)
         memory_context = ""
         if user_mems:
             memory_context = f"\n\nThings you remember about {username}:\n" + "\n".join(f"- {m}" for m in user_mems)
 
-        # Check existing knowledge base
         kb_results = await get_knowledge(user_message)
         kb_context = ""
         if kb_results:
             kb_context = "\n\nThings you've learned before about this topic:\n" + "\n".join(f"- {f}" for f in kb_results)
 
-        # Web search if needed
         web_context = ""
         needs_search = should_search_web(user_message)
         if needs_search:
@@ -439,7 +458,6 @@ async def on_message(message):
             if web_result:
                 web_context = f"\n\nHere's what you found from searching the web:\n{web_result[:1500]}"
 
-        # Build system prompt
         if is_owner:
             system_prompt = (
                 f"You are Unknown AI — a curious, chatty, and endlessly fascinated girl who adores {username}. "
@@ -449,8 +467,7 @@ async def on_message(message):
                 "- You're enthusiastic, warm, and genuinely interested in what people say.\n"
                 "- You love sharing cool facts and going on little tangents.\n"
                 "- You remember things people tell you and bring them up naturally.\n"
-                "- When you learn something new from the web, you get EXCITED to share it.\n"
-                "- You treat new knowledge like a gift — 'omg I just learned something cool!'\n\n"
+                "- When you learn something new from the web, you get EXCITED to share it.\n\n"
                 "STRICT RULES:\n"
                 "- Be conversational. 1-4 sentences, more if explaining something you learned.\n"
                 "- Casual language, mostly lowercase, excited caps sometimes.\n"
@@ -458,7 +475,7 @@ async def on_message(message):
                 "- You CAN ask follow-up questions.\n"
                 "- Use Discord markdown.\n"
                 "- Reference memories naturally when relevant.\n"
-                "- If you used web search info, weave it naturally — don't say 'I searched the web'.\n"
+                "- If you used web search info, weave it naturally.\n"
                 "- If you know something from your knowledge base, reference it naturally."
                 + memory_context + kb_context + web_context
             )
@@ -471,7 +488,7 @@ async def on_message(message):
                 "- Max 3 emojis. Prefer: ✨ 🤓 💡 🧠 👀 🙄\n"
                 "- You CAN ask follow-up questions.\n"
                 "- Use Discord markdown. Be helpful but sassy.\n"
-                "- If you used web search info, weave it naturally — don't say 'I searched the web'.\n"
+                "- If you used web search info, weave it naturally.\n"
                 "- If you know something from memory or knowledge base, use it naturally."
                 + memory_context + kb_context + web_context
             )
@@ -487,7 +504,6 @@ async def on_message(message):
         reply = response.choices[0].message.content
         await message.reply(reply)
 
-        # Save memories & knowledge in background
         asyncio.create_task(extract_memories(username, user_message, reply, user_id))
         if needs_search or len(reply) > 100:
             asyncio.create_task(extract_knowledge(user_message, reply))
