@@ -163,7 +163,7 @@ async def on_message(message):
             return await message.channel.send("Follow disabled.")
 
     # === Chat AI (respond when mentioned or in DMs) ===
-    if client.user.mentioned_in(message) or isinstance(message.channel, discord.DMChannel):
+   if client.user.mentioned_in(message) or isinstance(message.channel, discord.DMChannel) or "hey unknown" in message.content.lower():
         clean_text = message.content.replace(f"<@{client.user.id}>", "").strip()
         if not clean_text:
             return
