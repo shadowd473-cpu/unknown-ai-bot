@@ -19,7 +19,32 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
 client = discord.Client(intents=intents)
+guild = member.guild
+# Ignore no-op moves
+if before.channel == after.channel:
+    return
 
+# Debounce/lock to avoid thrash
+if connect_locks.get(guild.id):
+    return
+connect_locks[guild.id] = True
+
+try:
+    vc = guild.voice_client
+    if after.channel:  # owner joined/moved
+        if not vc or not vc.is_connected():
+            # Avoid auto-reconnect loops
+            await after.channel.connect(reconnect=False)
+        elif vc.channel != after.channel:
+            await vc.move_to(after.channel)
+    else:
+        # Owner left; comment out next two lines if you want the bot to STAY
+        if vc and vc.is_connected():
+            await vc.disconnect()
+finally:
+    # Short cooldown so multiple state changes don’t pile up
+    await asyncio.sleep(2)
+    connect_locks[guild.id] = False
 
 # ============================================
 # PERMANENT STORAGE (Base44 Database)
