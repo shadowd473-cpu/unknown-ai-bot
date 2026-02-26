@@ -4,54 +4,21 @@ import asyncio
 import discord
 import aiohttp
 from openai import OpenAI
-import yt_dlp
-import spotipy
-from spotipy.oauth2 import SpotifyClientCredentials
 
 # === CONFIG ===
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DISCORD_OWNER_ID = os.getenv("DISCORD_OWNER_ID")
-SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
-SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 BASE44_FUNCTION_URL = os.getenv("BASE44_FUNCTION_URL")
 BASE44_TOKEN = os.getenv("BASE44_TOKEN")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
-
-# Spotify client
-sp = None
-if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
-    sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
-        client_id=SPOTIFY_CLIENT_ID,
-        client_secret=SPOTIFY_CLIENT_SECRET,
-    ))
 
 # Discord client
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
 client = discord.Client(intents=intents)
-
-# Music state
-music_queues = {}
-now_playing = {}
-
-# yt-dlp options
-YDL_OPTIONS = {
-    "format": "bestaudio[ext=webm]/bestaudio/best",
-    "noplaylist": True,
-    "quiet": True,
-    "no_warnings": True,
-    "default_search": "ytsearch",
-    "extract_flat": False,
-    "skip_download": True,
-}
-
-FFMPEG_OPTIONS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    "options": "-vn",
-}
 
 
 # ============================================
@@ -185,168 +152,37 @@ def should_search_web(message):
 
 
 # ============================================
-# MUSIC FUNCTIONS
-# ============================================
-
-def get_queue(guild_id):
-    if guild_id not in music_queues:
-        music_queues[guild_id] = []
-    return music_queues[guild_id]
-
-
-def resolve_spotify_to_search(url):
-    if not sp:
-        return None
-    try:
-        if "track" in url:
-            track = sp.track(url)
-            return f"{track['name']} {track['artists'][0]['name']}"
-        elif "playlist" in url:
-            results = sp.playlist_tracks(url, limit=20)
-            tracks = []
-            for item in results["items"]:
-                t = item.get("track")
-                if t:
-                    tracks.append(f"{t['name']} {t['artists'][0]['name']}")
-            return tracks
-        elif "album" in url:
-            results = sp.album_tracks(url, limit=20)
-            tracks = []
-            for t in results["items"]:
-                tracks.append(f"{t['name']} {t['artists'][0]['name']}")
-            return tracks
-    except Exception as e:
-        print(f"Spotify resolve error: {e}")
-    return None
-
-
-def search_youtube(query):
-    try:
-        with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-            if query.startswith("http"):
-                info = ydl.extract_info(query, download=False)
-            else:
-                info = ydl.extract_info(f"ytsearch:{query}", download=False)
-            
-            if "entries" in info and len(info["entries"]) > 0:
-                entry = info["entries"][0]
-            else:
-                entry = info
-            
-            url = entry.get("url")
-            if not url:
-                webpage_url = entry.get("webpage_url") or entry.get("original_url")
-                if webpage_url:
-                    info2 = ydl.extract_info(webpage_url, download=False)
-                    url = info2.get("url")
-            
-            if url:
-                return {"url": url, "title": entry.get("title", query)}
-    except Exception as e:
-        print(f"YouTube search error: {e}")
-    return None
-
-
-async def play_next(guild_id, voice_client):
-    queue = get_queue(guild_id)
-    if not queue:
-        now_playing.pop(guild_id, None)
-        # Stay in VC, don't auto-disconnect
-        return
-    
-    song = queue.pop(0)
-    
-    # Lazy resolve if URL is missing
-    if not song.get("url"):
-        resolved = search_youtube(song.get("search_query", song["title"]))
-        if not resolved:
-            print(f"Couldn't resolve: {song['title']}, skipping")
-            await play_next(guild_id, voice_client)
-            return
-        song = resolved
-    
-    now_playing[guild_id] = song["title"]
-    
-    try:
-        source = discord.FFmpegPCMAudio(song["url"], **FFMPEG_OPTIONS)
-        source = discord.PCMVolumeTransformer(source, volume=0.5)
-    except Exception as e:
-        print(f"Error creating audio source: {e}")
-        now_playing.pop(guild_id, None)
-        return
-
-    def after_playing(error):
-        if error:
-            print(f"Player error: {error}")
-        fut = asyncio.run_coroutine_threadsafe(play_next(guild_id, voice_client), client.loop)
-        try:
-            fut.result(timeout=10)
-        except Exception as e:
-            print(f"Error in play_next callback: {e}")
-
-    if voice_client.is_connected():
-        voice_client.play(source, after=after_playing)
-    else:
-        now_playing.pop(guild_id, None)
-
-
-async def handle_play(message, query):
-    if not message.author.voice:
-        await message.reply("you gotta be in a voice channel first 🙄")
-        return
-
-    voice_channel = message.author.voice.channel
-    guild_id = message.guild.id
-    queue = get_queue(guild_id)
-
-    songs_to_add = []
-    if "open.spotify.com" in query:
-        result = resolve_spotify_to_search(query)
-        if result is None:
-            await message.reply("couldn't read that spotify link... is it valid? 🤔")
-            return
-        if isinstance(result, list):
-            await message.reply(f"loading **{len(result)}** tracks from spotify... ✨")
-            songs_to_add = result
-        else:
-            songs_to_add = [result]
-    else:
-        songs_to_add = [query]
-
-    # Only resolve the FIRST song now
-    first_song = search_youtube(songs_to_add[0])
-    if not first_song:
-        await message.reply("couldn't find that song 😔")
-        return
-
-    # Queue remaining as search terms (resolved lazily when played)
-    for sq in songs_to_add[1:]:
-        queue.append({"search_query": sq, "title": sq, "url": None})
-
-    voice_client = message.guild.voice_client
-    if not voice_client:
-        voice_client = await voice_channel.connect()
-    elif voice_client.channel != voice_channel:
-        await voice_client.move_to(voice_channel)
-
-    if not voice_client.is_playing() and not voice_client.is_paused():
-        queue.insert(0, first_song)
-        await play_next(guild_id, voice_client)
-        await message.reply(f"🎵 now playing: **{first_song['title']}**" +
-                          (f" (+{len(songs_to_add)-1} more queued)" if len(songs_to_add) > 1 else ""))
-    else:
-        queue.append(first_song)
-        await message.reply(f"added to queue: **{first_song['title']}**" +
-                          (f" (+{len(songs_to_add)-1} more)" if len(songs_to_add) > 1 else ""))
-
-
-# ============================================
 # BOT EVENTS
 # ============================================
 
 @client.event
 async def on_ready():
     print(f"Logged in as {client.user}")
+
+
+@client.event
+async def on_voice_state_update(member, before, after):
+    """Auto-join the owner's VC when they connect."""
+    if str(member.id) != DISCORD_OWNER_ID:
+        return
+    
+    # Owner joined or moved to a channel
+    if after.channel and (before.channel != after.channel):
+        guild = member.guild
+        vc = guild.voice_client
+        
+        if vc and vc.is_connected():
+            if vc.channel != after.channel:
+                await vc.move_to(after.channel)
+        else:
+            await after.channel.connect()
+    
+    # Owner left all VCs
+    if before.channel and not after.channel:
+        guild = member.guild
+        vc = guild.voice_client
+        if vc and vc.is_connected():
+            await vc.disconnect()
 
 
 @client.event
@@ -373,66 +209,27 @@ async def on_message(message):
         user_message = "hey"
 
     lower = user_message.lower()
-    guild_id = message.guild.id if message.guild else None
 
-    # === MUSIC COMMANDS ===
-    if lower.startswith("play "):
-        query = user_message[5:].strip()
-        if query:
-            await handle_play(message, query)
-            return
-
-    if lower in ("skip", "next"):
-        vc = message.guild.voice_client if message.guild else None
-        if vc and vc.is_playing():
-            vc.stop()
-            await message.reply("skipped ⏭️")
+    # === JOIN/LEAVE VC COMMANDS ===
+    if lower in ("join", "come here", "join vc"):
+        if message.author.voice and message.author.voice.channel:
+            vc = message.guild.voice_client
+            if vc and vc.is_connected():
+                await vc.move_to(message.author.voice.channel)
+            else:
+                await message.author.voice.channel.connect()
+            await message.reply("i'm here 💕")
         else:
-            await message.reply("nothing playing rn 🤷")
+            await message.reply("you're not in a vc 🙄")
         return
 
-    if lower in ("stop", "leave", "disconnect"):
+    if lower in ("leave", "leave vc", "disconnect", "go away"):
         vc = message.guild.voice_client if message.guild else None
         if vc:
-            if guild_id:
-                music_queues.pop(guild_id, None)
-                now_playing.pop(guild_id, None)
             await vc.disconnect()
             await message.reply("bye bye 👋")
         else:
             await message.reply("i'm not even in a vc 🙄")
-        return
-
-    if lower in ("queue", "q"):
-        queue = get_queue(guild_id) if guild_id else []
-        current = now_playing.get(guild_id)
-        if not current and not queue:
-            await message.reply("queue is empty 🤷")
-            return
-        msg = ""
-        if current:
-            msg += f"🎵 **Now playing:** {current}\n\n"
-        if queue:
-            msg += "**Up next:**\n"
-            for i, song in enumerate(queue[:10], 1):
-                msg += f"`{i}.` {song['title']}\n"
-            if len(queue) > 10:
-                msg += f"...and {len(queue)-10} more"
-        await message.reply(msg)
-        return
-
-    if lower in ("pause",):
-        vc = message.guild.voice_client if message.guild else None
-        if vc and vc.is_playing():
-            vc.pause()
-            await message.reply("paused ⏸️")
-        return
-
-    if lower in ("resume", "unpause"):
-        vc = message.guild.voice_client if message.guild else None
-        if vc and vc.is_paused():
-            vc.resume()
-            await message.reply("resumed ▶️")
         return
 
     # === AI CHAT ===
