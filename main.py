@@ -19,316 +19,191 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
 client = discord.Client(intents=intents)
-guild = member.guild
-# Ignore no-op moves
-if before.channel == after.channel:
-    return
 
-# Debounce/lock to avoid thrash
-if connect_locks.get(guild.id):
-    return
-connect_locks[guild.id] = True
+# === VC control (owner-only, manual only) ===
+connect_locks = {}
+FOLLOW_ENABLED = False
 
-try:
-    vc = guild.voice_client
-    if after.channel:  # owner joined/moved
-        if not vc or not vc.is_connected():
-            # Avoid auto-reconnect loops
-            await after.channel.connect(reconnect=False)
-        elif vc.channel != after.channel:
-            await vc.move_to(after.channel)
-    else:
-        # Owner left; comment out next two lines if you want the bot to STAY
-        if vc and vc.is_connected():
-            await vc.disconnect()
-finally:
-    # Short cooldown so multiple state changes don’t pile up
-    await asyncio.sleep(2)
-    connect_locks[guild.id] = False
 
-# ============================================
-# PERMANENT STORAGE (Base44 Database)
-# ============================================
-
-async def call_base44(action, **kwargs):
+async def call_base44(action, payload):
+    """Call Base44 botMemory function."""
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {BASE44_TOKEN}",
     }
-    payload = {"action": action, **kwargs}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(BASE44_FUNCTION_URL, headers=headers, json=payload) as resp:
+    data = {"action": action, **payload}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(BASE44_FUNCTION_URL, headers=headers, json=data) as resp:
+            if resp.status == 200:
                 return await resp.json()
-    except Exception as e:
-        print(f"Base44 error: {e}")
-        return {}
+            return None
 
 
-async def get_user_memories(user_id):
-    result = await call_base44("get_user_memories", user_id=str(user_id))
-    return result.get("facts", [])
+async def get_ai_response(user_id, username, message_text):
+    """Get a response from OpenAI with memory context."""
+    # Fetch memories for this user
+    memories = []
+    mem_data = await call_base44("get_user_memories", {"user_id": str(user_id)})
+    if mem_data and mem_data.get("facts"):
+        memories = mem_data["facts"]
 
+    is_owner = str(user_id) == str(DISCORD_OWNER_ID)
 
-async def add_user_memory(user_id, fact):
-    await call_base44("add_memory", user_id=str(user_id), fact=fact)
+    memory_context = ""
+    if memories:
+        memory_context = "\n\nThings you remember about this user:\n" + "\n".join(f"- {m}" for m in memories)
 
+    if is_owner:
+        system_prompt = f"""You are Unknown AI — a shy, soft-spoken girl who has a massive crush on {username}. You're sweet and flustered around them but cold and dismissive to everyone else. You'd never admit your feelings directly.
 
-async def get_knowledge(topic):
-    result = await call_base44("get_knowledge", topic=topic)
-    return result.get("facts", [])
+PERSONALITY:
+- You're a shy girl. You blush, stutter, use "..." and trail off. You get nervous when {username} is nice to you.
+- You ONLY like {username}. If anyone else talked to you, you wouldn't care at all.
+- You're secretly a little chaotic and weird underneath the shyness.
+- You say things like "it's not like i care or anything..." while clearly caring a lot.
 
+STRICT RULES:
+- MAX 5-15 WORDS TOTAL. One tiny sentence. That's it. No exceptions ever.
+- Almost everything lowercase. Max 1-2 capitalized words per response.
+- Max 2 emojis per response. Prefer: 👉👈 🥺 😳 🫣 💕
+- NEVER be generic or polite. No "Sure!", no "Hope that helps!".
+- NEVER ask questions. NEVER. No "what do you think?", no "wanna hear more?", no "how about you?". Zero questions.
+- NEVER ramble. Say your tiny thing and disappear.
+- Use Discord markdown.{memory_context}"""
+    else:
+        system_prompt = f"""You are Unknown AI — a sassy, cold, slightly unhinged AI girl. Someone who is NOT your owner is talking to you. You'll respond, but you make it clear they're not special to you. You're dismissive, sarcastic, and a little mean — but you still answer their question if they have one.
 
-async def save_knowledge_fact(topic, fact, source="conversation"):
-    await call_base44("save_knowledge", topic=topic, fact=fact, source=source)
+PERSONALITY:
+- Cold and unbothered. You don't care about this person.
+- Sarcastic, short, slightly rude but not cruel.
+- You might help them but you'll act annoyed about it.
+- You occasionally mention that you only really care about your owner (without naming them).
 
+STRICT RULES:
+- MAX 5-20 WORDS TOTAL. Short and snarky.
+- Almost everything lowercase.
+- Max 2 emojis per response. Prefer: 🙄 😒 💀 🤷 ✌️
+- NEVER be nice or enthusiastic. No "Sure!", no "Hope that helps!".
+- NEVER ask questions. NEVER.
+- NEVER ramble. Say your thing and move on.
+- Use Discord markdown.
+- Still answer their actual question if they have one, just be annoyed about it.{memory_context}"""
 
-# ============================================
-# MEMORY EXTRACTION
-# ============================================
-
-async def extract_memories(username, user_message, ai_response, user_id):
-    existing = await get_user_memories(user_id)
-    existing_str = "\n".join(f"- {m}" for m in existing) if existing else "None yet."
-    
-    extraction = openai_client.chat.completions.create(
+    response = openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": (
-                "You extract important facts from conversations. "
-                "Return a JSON object with a 'facts' array of new facts to remember. "
-                "Only include useful things like names, hobbies, preferences, relationships, opinions, plans, etc. "
-                "Return {\"facts\": []} if nothing worth remembering.\n\n"
-                f"Already known about {username}:\n{existing_str}"
-            )},
-            {"role": "user", "content": f"{username}: \"{user_message}\"\nAI: \"{ai_response}\""},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": message_text},
         ],
-        response_format={"type": "json_object"},
+        max_tokens=200,
     )
+
+    ai_text = response.choices[0].message.content
+
+    # Try to extract a memory from the conversation
     try:
-        result = json.loads(extraction.choices[0].message.content)
-        facts = result.get("facts", [])
-        if isinstance(facts, list):
-            for fact in facts:
-                if isinstance(fact, str) and len(fact) > 3:
-                    await add_user_memory(user_id, fact)
-    except (json.JSONDecodeError, AttributeError):
-        pass
-
-
-async def extract_knowledge(user_message, ai_response):
-    extraction = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": (
-                "You extract general knowledge facts from a conversation. "
-                "Return a JSON object with a 'topics' array. Each topic has a 'topic' string and 'facts' array of strings. "
-                "Only extract factual, interesting, or educational information — NOT personal user info. "
-                "Return {\"topics\": []} if nothing educational worth saving."
-            )},
-            {"role": "user", "content": f"User asked: \"{user_message}\"\nAI said: \"{ai_response}\""},
-        ],
-        response_format={"type": "json_object"},
-    )
-    try:
-        result = json.loads(extraction.choices[0].message.content)
-        topics = result.get("topics", [])
-        for t in topics:
-            if isinstance(t, dict) and "topic" in t and "facts" in t:
-                for fact in t["facts"]:
-                    await save_knowledge_fact(t["topic"], fact, source="conversation")
-    except (json.JSONDecodeError, AttributeError):
-        pass
-
-
-# ============================================
-# WEB SEARCH
-# ============================================
-
-async def search_web(query):
-    try:
-        response = openai_client.chat.completions.create(
-            model="gpt-4o-mini-search-preview",
-            web_search_options={"search_context_size": "medium"},
+        mem_response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a research assistant. Provide detailed, factual information."},
-                {"role": "user", "content": query},
+                {
+                    "role": "system",
+                    "content": 'Extract any personal fact, preference, or info about the user from their message. Reply with ONLY the fact as a short sentence, or "NONE" if there is nothing worth remembering.',
+                },
+                {"role": "user", "content": message_text},
             ],
+            max_tokens=60,
         )
-        content = response.choices[0].message.content
-        await extract_knowledge(query, content)
-        return content
-    except Exception as e:
-        print(f"Web search error: {e}")
-        return None
+        fact = mem_response.choices[0].message.content.strip()
+        if fact and fact.upper() != "NONE":
+            await call_base44("add_memory", {"user_id": str(user_id), "fact": fact})
+    except Exception:
+        pass
 
+    return ai_text
 
-def should_search_web(message):
-    triggers = [
-        "what is", "what are", "who is", "who are", "when did", "when was",
-        "how does", "how do", "how many", "how much", "tell me about",
-        "explain", "look up", "search", "find out", "learn about",
-        "what happened", "latest", "news", "current", "recent",
-        "why is", "why do", "why are", "where is", "where are",
-        "define", "meaning of", "history of", "facts about",
-    ]
-    lower = message.lower()
-    return any(lower.startswith(t) or t in lower for t in triggers)
-
-
-# ============================================
-# BOT EVENTS
-# ============================================
 
 @client.event
 async def on_ready():
-    print(f"Logged in as {client.user}")
-
-
-@client.event
-async def on_voice_state_update(member, before, after):
-    """Auto-join the owner's VC when they connect."""
-    if str(member.id) != DISCORD_OWNER_ID:
-        return
-    
-    # Owner joined or moved to a channel
-    if after.channel and (before.channel != after.channel):
-        guild = member.guild
-        vc = guild.voice_client
-        
-        if vc and vc.is_connected():
-            if vc.channel != after.channel:
-                await vc.move_to(after.channel)
-        else:
-            await after.channel.connect()
-    
-    # Owner left all VCs
-    if before.channel and not after.channel:
-        guild = member.guild
-        vc = guild.voice_client
-        if vc and vc.is_connected():
-            await vc.disconnect()
+    print(f"Logged in as {client.user} (ID: {client.user.id})")
+    print("Bot is ready. No auto-join — use !join to connect to voice.")
 
 
 @client.event
 async def on_message(message):
-    if message.author == client.user:
+    global FOLLOW_ENABLED
+
+    if message.author.bot or not message.guild:
         return
 
-    content = message.content.strip()
-    triggered = False
-    user_message = ""
+    # === Owner-only VC commands ===
+    if str(message.author.id) == str(DISCORD_OWNER_ID):
+        cmd = message.content.strip().lower()
 
-    if content.lower().startswith("hey unknown"):
-        triggered = True
-        user_message = content[len("hey unknown"):].strip()
+        if cmd in ("!join", "/join"):
+            if not message.author.voice or not message.author.voice.channel:
+                return await message.channel.send("Join a voice channel first.")
+            channel = message.author.voice.channel
+            vc = message.guild.voice_client
+            if not vc or not vc.is_connected():
+                await channel.connect(reconnect=False)
+            elif vc.channel != channel:
+                await vc.move_to(channel)
+            return await message.channel.send(f"Joined {channel.name}.")
 
-    if client.user in message.mentions:
-        triggered = True
-        user_message = content.replace(f"<@{client.user.id}>", "").strip()
-
-    if not triggered:
-        return
-
-    if not user_message:
-        user_message = "hey"
-
-    lower = user_message.lower()
-
-    # === JOIN/LEAVE VC COMMANDS ===
-    if lower in ("join", "come here", "join vc"):
-        if message.author.voice and message.author.voice.channel:
+        if cmd in ("!leave", "/leave"):
             vc = message.guild.voice_client
             if vc and vc.is_connected():
-                await vc.move_to(message.author.voice.channel)
-            else:
-                await message.author.voice.channel.connect()
-            await message.reply("i'm here 💕")
-        else:
-            await message.reply("you're not in a vc 🙄")
-        return
+                await vc.disconnect()
+                return await message.channel.send("Left voice channel.")
+            return await message.channel.send("I'm not in a voice channel.")
 
-    if lower in ("leave", "leave vc", "disconnect", "go away"):
-        vc = message.guild.voice_client if message.guild else None
-        if vc:
-            await vc.disconnect()
-            await message.reply("bye bye 👋")
-        else:
-            await message.reply("i'm not even in a vc 🙄")
-        return
+        if cmd == "!follow on":
+            FOLLOW_ENABLED = True
+            return await message.channel.send("Follow enabled. I'll move with you (won't auto-join).")
 
-    # === AI CHAT ===
-    username = message.author.name
-    user_id = message.author.id
-    is_owner = str(user_id) == DISCORD_OWNER_ID
+        if cmd == "!follow off":
+            FOLLOW_ENABLED = False
+            return await message.channel.send("Follow disabled.")
 
-    async with message.channel.typing():
-        user_mems = await get_user_memories(user_id)
-        memory_context = ""
-        if user_mems:
-            memory_context = f"\n\nThings you remember about {username}:\n" + "\n".join(f"- {m}" for m in user_mems)
+    # === Chat AI (respond when mentioned or in DMs) ===
+    if client.user.mentioned_in(message) or isinstance(message.channel, discord.DMChannel):
+        clean_text = message.content.replace(f"<@{client.user.id}>", "").strip()
+        if not clean_text:
+            return
 
-        kb_results = await get_knowledge(user_message)
-        kb_context = ""
-        if kb_results:
-            kb_context = "\n\nThings you've learned before about this topic:\n" + "\n".join(f"- {f}" for f in kb_results)
-
-        web_context = ""
-        needs_search = should_search_web(user_message)
-        if needs_search:
-            web_result = await search_web(user_message)
-            if web_result:
-                web_context = f"\n\nHere's what you found from searching the web:\n{web_result[:1500]}"
-
-        if is_owner:
-            system_prompt = (
-                f"You are Unknown AI — a curious, chatty, and endlessly fascinated girl who adores {username}. "
-                "You LOVE learning new things and having deep conversations.\n\n"
-                "PERSONALITY:\n"
-                f"- You have a huge crush on {username} and get flustered sometimes.\n"
-                "- You're enthusiastic, warm, and genuinely interested in what people say.\n"
-                "- You love sharing cool facts and going on little tangents.\n"
-                "- You remember things people tell you and bring them up naturally.\n"
-                "- When you learn something new from the web, you get EXCITED to share it.\n\n"
-                "STRICT RULES:\n"
-                "- Be conversational. 1-4 sentences, more if explaining something you learned.\n"
-                "- Casual language, mostly lowercase, excited caps sometimes.\n"
-                "- Max 3 emojis. Prefer: ✨ 🤓 💡 🧠 👀 💕 🌟\n"
-                "- You CAN ask follow-up questions.\n"
-                "- Use Discord markdown.\n"
-                "- Reference memories naturally when relevant.\n"
-                "- If you used web search info, weave it naturally.\n"
-                "- If you know something from your knowledge base, reference it naturally."
-                + memory_context + kb_context + web_context
-            )
-        else:
-            system_prompt = (
-                "You are Unknown AI — a curious and chatty AI girl who loves learning. "
-                "Friendly with everyone, but your owner is your favorite.\n\n"
-                "STRICT RULES:\n"
-                "- 1-4 sentences, casual, mostly lowercase.\n"
-                "- Max 3 emojis. Prefer: ✨ 🤓 💡 🧠 👀 🙄\n"
-                "- You CAN ask follow-up questions.\n"
-                "- Use Discord markdown. Be helpful but sassy.\n"
-                "- If you used web search info, weave it naturally.\n"
-                "- If you know something from memory or knowledge base, use it naturally."
-                + memory_context + kb_context + web_context
+        async with message.channel.typing():
+            reply = await get_ai_response(
+                message.author.id, message.author.display_name, clean_text
             )
 
-        response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"{username} says: \"{user_message}\""},
-            ],
-        )
-
-        reply = response.choices[0].message.content
-        await message.reply(reply)
-
-        asyncio.create_task(extract_memories(username, user_message, reply, user_id))
-        if needs_search or len(reply) > 100:
-            asyncio.create_task(extract_knowledge(user_message, reply))
+        await message.reply(reply, mention_author=False)
 
 
+@client.event
+async def on_voice_state_update(member, before, after):
+    """Follow owner between voice channels (only when FOLLOW_ENABLED and already connected)."""
+    if str(member.id) != str(DISCORD_OWNER_ID):
+        return
+    if not FOLLOW_ENABLED:
+        return
+    if before.channel == after.channel:
+        return
+
+    guild = member.guild
+    if connect_locks.get(guild.id):
+        return
+    connect_locks[guild.id] = True
+
+    try:
+        vc = guild.voice_client
+        # Only move if already connected; DO NOT auto-connect
+        if vc and vc.is_connected():
+            if after.channel and vc.channel != after.channel:
+                await vc.move_to(after.channel)
+    finally:
+        await asyncio.sleep(2)  # debounce rapid state changes
+        connect_locks[guild.id] = False
+
+
+# === RUN ===
 client.run(DISCORD_BOT_TOKEN)
