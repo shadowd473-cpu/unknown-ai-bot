@@ -139,15 +139,7 @@ async def on_message(message):
                 return await message.channel.send("Left voice channel.")
             return await message.channel.send("I'm not in a voice channel.")
 
-        if cmd == "!follow on":
-            FOLLOW_ENABLED = True
-            return await message.channel.send("Follow enabled. I'll move with you (won't auto-join).")
-
-        if cmd == "!follow off":
-            FOLLOW_ENABLED = False
-            return await message.channel.send("Follow disabled.")
-
-    # === Chat AI (respond when mentioned or in DMs) ===
+        # === Chat AI (respond when mentioned or in DMs) ===
     if client.user.mentioned_in(message) or isinstance(message.channel, discord.DMChannel) or "hey unknown" in message.content.lower():
         clean_text = message.content.replace(f"<@{client.user.id}>", "").strip()
         if not clean_text:
@@ -160,31 +152,6 @@ async def on_message(message):
 
         await message.reply(reply, mention_author=False)
 
-
-@client.event
-async def on_voice_state_update(member, before, after):
-    """Follow owner between voice channels (only when FOLLOW_ENABLED and already connected)."""
-    if str(member.id) != str(DISCORD_OWNER_ID):
-        return
-    if not FOLLOW_ENABLED:
-        return
-    if before.channel == after.channel:
-        return
-
-    guild = member.guild
-    if connect_locks.get(guild.id):
-        return
-    connect_locks[guild.id] = True
-
-    try:
-        vc = guild.voice_client
-        # Only move if already connected; DO NOT auto-connect
-        if vc and vc.is_connected():
-            if after.channel and vc.channel != after.channel:
-                await vc.move_to(after.channel)
-    finally:
-        await asyncio.sleep(2)  # debounce rapid state changes
-        connect_locks[guild.id] = False
 
 
 # === RUN ===
