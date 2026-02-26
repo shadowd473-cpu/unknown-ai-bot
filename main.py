@@ -116,12 +116,14 @@ async def on_ready():
     print("Bot is ready. Use !join / !leave for voice.")
 
 async def keep_silence_loop():
-    """Ensures silence keeps playing so bot stays connected."""
     while True:
         await asyncio.sleep(30)
         for vc in client.voice_clients:
-            if vc.is_connected() and not vc.is_playing():
-                vc.play(SilenceSource(), after=lambda e: None)
+            try:
+                if vc.is_connected() and not vc.is_playing():
+                    vc.play(SilenceSource(), after=lambda e: None)
+            except Exception:
+                pass
                 
 @client.event
 async def on_message(message):
@@ -138,11 +140,12 @@ async def on_message(message):
             channel = message.author.voice.channel
             vc = message.guild.voice_client
             if not vc or not vc.is_connected():
-                vc = await channel.connect(reconnect=True)
+                vc = await channel.connect(reconnect=False)
             elif vc.channel != channel:
                 await vc.move_to(channel)
-            # Play silence to prevent auto-disconnect
-            if not vc.is_playing():
+            # Small delay then play silence to stay connected
+            await asyncio.sleep(1)
+            if vc.is_connected() and not vc.is_playing():
                 vc.play(SilenceSource(), after=lambda e: None)
             return await message.channel.send(f"Joined {channel.name}.")
 
